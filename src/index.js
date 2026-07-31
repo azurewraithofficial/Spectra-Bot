@@ -8,9 +8,22 @@ const {
 } = require('discord.js');
 
 const token = process.env.DISCORD_TOKEN;
+const customerServerIds = new Set(
+  (process.env.CUSTOMER_SERVER_IDS ?? '')
+    .split(',')
+    .map((serverId) => serverId.trim())
+    .filter(Boolean),
+);
 
 if (!token) {
   console.error('Missing DISCORD_TOKEN environment variable.');
+  process.exit(1);
+}
+
+const invalidServerIds = [...customerServerIds].filter((serverId) => !/^\d{17,20}$/.test(serverId));
+
+if (invalidServerIds.length > 0) {
+  console.error(`Invalid server IDs in CUSTOMER_SERVER_IDS: ${invalidServerIds.join(', ')}`);
   process.exit(1);
 }
 
@@ -31,7 +44,33 @@ const commands = [pingCommand, botOwnerCommand];
 
 client.once(Events.ClientReady, async (readyClient) => {
   try {
-    await readyClient.application.commands.set(commands.map((command) => command.toJSON()));
+    const commandData = commands.map((command) => command.toJSON());
+
+    // Keep commands out of Discord's global command list. Customer commands are
+    // registered per server so they appear quickly and only where licensed.
+    await readyClient.application.commands.set([]);
+
+    for (const guild of readyClient.guilds.cache.values()) {
+      const isCustomerServer = customerServerIds.has(guild.id);
+      await guild.commands.set(isCustomerServer ? commandData : []);
+
+      console.log(
+        `${isCustomerServer ? 'Enabled' : 'Disabled'} commands for ${guild.name} (${guild.id})`,
+      );
+    }
+
+    const missingServerIds = [...customerServerIds].filter(
+      (serverId) => !readyClient.guilds.cache.has(serverId),
+    );
+
+    if (missingServerIds.length > 0) {
+      console.warn(`Bot is not currently in customer servers: ${missingServerIds.join(', ')}`);
+    }
+
+    if (customerServerIds.size === 0) {
+      console.warn('CUSTOMER_SERVER_IDS is empty. Commands are disabled in every server.');
+    }
+
     console.log(`Logged in as ${readyClient.user.tag}`);
   } catch (error) {
     console.error('Failed to register slash commands:', error);
@@ -40,6 +79,14 @@ client.once(Events.ClientReady, async (readyClient) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  if (!interaction.guildId || !customerServerIds.has(interaction.guildId)) {
+    await interaction.reply({
+      content: 'This server does not have an active Spectra license.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
   if (interaction.commandName === 'bot-owner') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
